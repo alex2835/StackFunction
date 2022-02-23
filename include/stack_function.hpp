@@ -16,31 +16,36 @@ class StackFunction<RetType(Args...), StorageSize>
 public:
 	StackFunction() = default;
 
-    /**
-     * @brief StackFunction Constructor from functional object.
-     * @param object Functor object will be stored in the internal storage
-     * using move constructor. Unmovable objects are prohibited explicitly.
-     */
-    template <typename FUNC>
-    StackFunction(FUNC object)
-    {
-        typedef typename std::remove_reference<FUNC>::type UnrefFunctionType;
+	/**
+	 * @brief StackFunction Constructor from functional object.
+	 * @param object Functor object will be stored in the internal storage
+	 * using move constructor. Unmovable objects are prohibited explicitly.
+	 */
+	template <typename FUNC>
+	StackFunction(FUNC object)
+	{
+		typedef typename std::remove_reference<FUNC>::type UnrefFunctionType;
 		static_assert(sizeof(UnrefFunctionType) < StorageSize, "functional object doesn't fit into internal storage");
 		static_assert(std::is_move_constructible<UnrefFunctionType>::value, "Type should be movable");
 
-		auto* functional_object = reinterpret_cast<UnrefFunctionType*>(&object);
-		::new(&mStorage) UnrefFunctionType(std::move(*functional_object));
+		mCollable = [](void* object, FunctionPtrType /*func*/, Args... args) -> RetType
+		{
+			return static_cast<UnrefFunctionType*>(object)->operator()(args...);
+		};
 
-        mCollable = [](void* object, FunctionPtrType /*func*/, Args... args) -> RetType
-        {
-            return static_cast<UnrefFunctionType*>(object)->operator()(args...);
-        };
+		mAllocFunc = [](void *storage, void *object)
+		{
+			auto* functional_object = reinterpret_cast<UnrefFunctionType*>(object);
+			::new(storage) UnrefFunctionType(std::move(*functional_object));
+		};
 
-        mDealocFunc = [](void* storage)
-        {
-            static_cast<UnrefFunctionType*>(storage)->~UnrefFunctionType();
-        };
-    }
+		mDealocFunc = [](void* storage)
+		{
+			static_cast<UnrefFunctionType*>(storage)->~UnrefFunctionType();
+		};
+
+		mAllocFunc(&mStorage, &object);
+	}
 
 	/**
 	 * @brief StackFunction Constructor from function pointer
@@ -49,12 +54,12 @@ public:
 	StackFunction(RET(*func_ptr)(PARAMS...))
 	{
 		mFunctionPtr = func_ptr;
-		mCollable = [](void* /*object*/, FunctionPtrType func, Args... args) -> RetType
+		mCollable = [](void* /*object*/, FunctionPtrType func, Args&&... args) -> RetType
 		{
-			return static_cast<RET(*)(PARAMS...)>(func)(args...);
+			return static_cast<RET(*)(PARAMS...)>(func)(std::forward<Args>(args)...);
 		};
 	}
-	StackFunction(StackFunction&& o)
+	StackFunction(StackFunction &&o)
 	{
 		MoveFromOther(o);
 	}
@@ -65,23 +70,24 @@ public:
 		return *this;
 	}
 
-    ~StackFunction()
-    {
-        if (mDealocFunc)
+	~StackFunction()
+	{
+		if (mDealocFunc)
 			mDealocFunc(&mStorage);
-    }
+	}
 
-    RetType operator()(Args... args)
-    {
-        if (!mCollable) throw std::runtime_error("call of empty functor");
-		return mCollable(&mStorage, mFunctionPtr, args...);
-    }
+	RetType operator()(Args&&... args)
+	{
+		if (!mCollable)
+			throw std::runtime_error("call of empty functor");
+		return mCollable(&mStorage, mFunctionPtr, std::forward<Args>(args)...);
+	}
 
 private:
 	void MoveFromOther(StackFunction& o)
 	{
-		if (this == &o) 
-            return;
+		if (this == &o)
+			return;
 
 		if (mDealocFunc)
 			mDealocFunc(&mStorage);
@@ -94,7 +100,6 @@ private:
 			mAllocFunc = o.mAllocFunc;
 			mAllocFunc(&mStorage, &o.mStorage);
 		}
-
 
 		o.mCollable    = nullptr;
 		o.mFunctionPtr = nullptr;
@@ -109,6 +114,6 @@ private:
 		std::aligned_storage<StorageSize, alignof(size_t)> mStorage;
 	};
 	CollableType mCollable = nullptr;
-	AllocType  mAllocFunc  = nullptr;
+	AllocType mAllocFunc   = nullptr;
 	DealocType mDealocFunc = nullptr;
 };
